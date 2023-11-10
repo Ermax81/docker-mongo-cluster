@@ -1,0 +1,106 @@
+# https://docs.docker.com/compose/compose-file/
+#version: "3.8"
+version: "2.4"
+# https://docs.docker.com/compose/compose-file/compose-versioning/
+
+# docker-compose starter order : https://docs.docker.com/compose/startup-order/
+# docker-compose depends_on : https://docs.docker.com/compose/compose-file/05-services/#depends_on
+# Sources:
+# - https://stackoverflow.com/questions/48684609/control-startup-order-in-docker-compose
+# - https://stackoverflow.com/questions/37839365/simple-http-tcp-health-check-for-mongodb
+# - https://www.grottedubarbu.fr/docker-healthcheck/
+# - https://stackoverflow.com/questions/52322800/docker-compose-how-to-wait-for-other-service-to-be-ready
+
+services:
+
+  #NB: do not use user/password for mongo !
+  #NB: no data volume -> no local backup
+
+  mongo1:
+    image: mongo:4.2.1 # > version 4 used for transactions
+    container_name: mongo1
+    hostname: mongo1
+    networks:
+      - mongo_network
+    ports:
+      - 27017:27017
+    command: mongod --replSet rs0 --port 27017
+    healthcheck:
+      test: test $$(echo "rs.initiate().ok || rs.status().ok" | mongo --quiet) -eq 1
+      interval: 1m
+      start_period: 10s
+
+  mongo2:
+    image: mongo:4.2.1 # > version 4 used for transactions
+    container_name: mongo2
+    hostname: mongo2
+    networks:
+      - mongo_network
+    ports:
+      - 27018:27018
+    command: mongod --replSet rs0 --port 27018
+
+  mongo3:
+    image: mongo:4.2.1 # > version 4 used for transactions
+    container_name: mongo3
+    hostname: mongo3
+    networks:
+      - mongo_network
+    ports:
+      - 27019:27019
+    command: mongod --replSet rs0 --port 27019
+
+  mongo-rs0-setup: #only use mongo client to configure replicat set
+    image: mongo:4.2.1
+    container_name: mongo-rs0-setup
+    hostname: mongo-rs0-setup
+    depends_on:
+      mongo1:
+        condition: service_started
+      mongo2:
+        condition: service_started
+      mongo3:
+        condition: service_started
+    # make mongo1, mongo2, mongo3 available as the hostname "mongo1, mongo2, mongo3"
+    # (implies depends_on)
+    networks:
+      - mongo_network
+    environment:
+      - MONGO1=mongo1
+      - MONGO2=mongo2
+      - MONGO3=mongo3
+      - RS=rs0
+    command: 
+      - /bin/bash
+      - -c
+      - |
+        sleep 10
+        mongo --host mongo1:27017 --eval "rs.status().ok;"
+        mongo --host mongo1:27017 --eval "rs.initiate({_id : 'rs0','members' : [{_id : 0, host : 'mongo1:27017'},{_id : 1, host : 'mongo2:27018'},{_id : 2, host : 'mongo3:27019'}]})"
+        sleep 60
+        mongo --host mongo1:27017 --eval "rs.status().ok;"
+        mongo --host mongo1:27017 --eval "rs.initiate().ok;"
+        exec sleep inf
+      
+  mongo-check: #only use mongo client to check replicat set
+    image: mongo:4.2.1
+    container_name: mongo-check
+    hostname: mongo-check
+    depends_on:
+      mongo1:
+        condition: service_healthy
+    command: mongod --port 27020
+    networks:
+      - mongo_network
+    ports:
+      - "27020:27020"
+    healthcheck:
+      test: test $$(mongo --host "mongodb://mongo1:27017,mongo2:27018,mongo3:27019/local?replicaSet=rs0" --eval 'rs.status().ok' --quiet | tail -1) -eq 1
+      interval: 10s
+      retries: 5
+      start_period: 90s
+
+
+networks:
+  mongo_network:
+    driver: bridge
